@@ -28,7 +28,7 @@ func TestPipelineMarshal(t *testing.T) {
 
 		if buf, err := h.AsPipeline(); err != nil {
 			t.Error(err)
-		} else if err = checkPipelineMarshal(h, buf.Bytes()); err != nil {
+		} else if err = checkPipelineMarshal(h, buf); err != nil {
 			t.Error(err)
 		}
 	}
@@ -42,14 +42,14 @@ func checkPipelineMarshal(h *HLLPP, b []byte) error {
 		return err
 	}
 
-	if preamble.Encoding != encodingExplicitClean && preamble.Encoding != encodingDenseClean {
+	if preamble.Encoding != PipelineExplicitClean && preamble.Encoding != PipelineDenseClean {
 		return fmt.Errorf("unexpected encoding: %c", preamble.Encoding)
 	}
 
 	data := make([]byte, preamble.Mlen)
 	if n, err := buf.Read(data); err != nil {
 		return err
-	} else if int32(n) != preamble.Mlen {
+	} else if uint32(n) != preamble.Mlen {
 		return fmt.Errorf("short read expected %d bytes got %d", preamble.Mlen, n)
 	}
 
