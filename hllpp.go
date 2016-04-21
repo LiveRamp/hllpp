@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 )
 
 // HLLPP represents a single HyperLogLog++ estimator. Create one via New().
@@ -129,6 +130,19 @@ func (h *HLLPP) updateRegisterIfBigger(idx uint32, rho uint8) {
 	}
 }
 
+// Deep-copies a |HLLPP| object.
+func (h *HLLPP) Copy() *HLLPP {
+	newH := *h
+
+	newH.data = make([]byte, len(h.data))
+	copy(newH.data, h.data)
+
+	newH.tmpSet = make([]uint32, len(h.tmpSet))
+	copy(newH.tmpSet, h.tmpSet)
+
+	return &newH
+}
+
 // Count returns the current cardinality estimate for h.
 func (h *HLLPP) Count() uint64 {
 	if h.sparse {
@@ -202,6 +216,8 @@ func (h *HLLPP) Merge(other *HLLPP) error {
 	return nil
 }
 
+func (h *HLLPP) IsSparse() bool { return h.sparse }
+
 func (h *HLLPP) toNormal() {
 	if !h.sparse {
 		return
@@ -233,6 +249,24 @@ func (h *HLLPP) toNormal() {
 	h.sparse = false
 }
 
+func (h *HLLPP) DumpRegisters() []Register {
+	var ret RegisterSlice
+	if h.sparse {
+		h.flushTmpSet()
+		reader := newSparseReader(h.data)
+		for !reader.Done() {
+			reg, val := h.decodeHash(reader.Next(), h.p)
+			ret = append(ret, Register{reg, val})
+		}
+		sort.Sort(ret)
+	} else {
+		for i := uint32(0); i < h.m; i++ {
+			ret = append(ret, Register{i, getRegister(h.data, h.bitsPerRegister, i)})
+		}
+	}
+	return ret
+}
+
 func linearCounting(m, v uint32) uint64 {
 	return uint64(float64(m)*math.Log(float64(m)/float64(v)) + 0.5)
 }
@@ -253,4 +287,24 @@ func rho(x uint64) (z uint8) {
 		z++
 	}
 	return z + 1
+}
+
+// (register-index, value) tuple that can be sorted on register-index.
+type Register struct {
+	Index uint32
+	Value uint8
+}
+
+type RegisterSlice []Register
+
+func (s RegisterSlice) Len() int {
+	return len(s)
+}
+
+func (s RegisterSlice) Less(i, j int) bool {
+	return s[i].Index < s[j].Index
+}
+
+func (s RegisterSlice) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
 }
