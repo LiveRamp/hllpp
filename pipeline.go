@@ -3,6 +3,8 @@ package hllpp
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
+	"sort"
 )
 
 // Padded PipelineDB HyperLogLog struct observed on database-2 (0.8.5, x64)
@@ -22,20 +24,29 @@ const (
 	PipelineDenseClean    = 'D'
 	PipelineExplicitDirty = 'e'
 	PipelineExplicitClean = 'E'
+	PipelineSparseClean   = 'S'
+	PipelineSparseDirty   = 's'
 
 	// Private constants.
 	pipelineBitsPerRegister = 6
+
+	// Technically, PipelineDB supports up to 8192 explicit registers before
+	// converting to sparse representation. But we lower this because of
+	// observed problems with explicit HLLs at medium cardinalities.
+	maxExplicitRegisters = 600
 
 	// Feature flags.
 
 	// Whether to always write 'dense' PipelineDB HLLs. Currently, this is true
 	// because I observe cardinality / union issues when taking the union of
 	// explicit PipelineDB HLLs that were converted from Retailnext.
-	alwaysWriteDense = true
+	alwaysWriteDense = false
+)
 
+var (
 	// Whether to mark the cardinality calculation as clean or dirty. Clean is
 	// better for production, but dirty is better for testing.
-	writeDirtyEncoding = false
+	WriteDirtyEncoding = false
 )
 
 // Converts dense or sparse data structure to Pipeline padded struct.
@@ -43,7 +54,7 @@ func (h *HLLPP) AsPipeline() ([]byte, error) {
 	if !h.sparse || alwaysWriteDense {
 		return h.convertToDense()
 	} else {
-		return h.convertToSparse()
+		return h.convertToExplicit()
 	}
 }
 
@@ -53,7 +64,7 @@ func (h *HLLPP) convertToDense() ([]byte, error) {
 		Mlen: 1 + h.m*pipelineBitsPerRegister/8,
 		P:    h.p,
 	}
-	if writeDirtyEncoding {
+	if WriteDirtyEncoding {
 		p.Encoding = PipelineDenseDirty
 	} else {
 		p.Encoding = PipelineDenseClean
@@ -77,13 +88,41 @@ func (h *HLLPP) convertToDense() ([]byte, error) {
 	return ret.Bytes(), err
 }
 
-func (h *HLLPP) convertToSparse() ([]byte, error) {
+func (h *HLLPP) convertToExplicit() ([]byte, error) {
+	if h.sparse {
+		h.flushTmpSet()
+	}
+
+	// Read registers out of Retailnext implementation and write to whichever
+	// format we selected above.
+	var registers RegisterSlice
+	for it := newRegIterator(h); !it.done(); {
+		reg, val := it.next()
+		registers = append(registers, Register{reg, val})
+
+		if len(registers) >= maxExplicitRegisters {
+			// If the number of registers exceeds the maximum for PipelineDB's
+			// EXPLICIT mode, stop now and fall backt to DENSE. Technically, we
+			// should go to SPARSE to match PipelineDB's behavior.
+			return h.convertToDense()
+		}
+	}
+
+	var regBuf bytes.Buffer
+	sort.Sort(registers)
+	for i := range registers {
+		packed := uint32(registers[i].Index<<8) | uint32(registers[i].Value&0xff)
+		if err := binary.Write(&regBuf, binary.LittleEndian, packed); err != nil {
+			return nil, err
+		}
+	}
+
 	p := pipelineHLL{
 		Card: h.Count(),
-		Mlen: 4 * h.sparseLength,
+		Mlen: uint32(regBuf.Len()),
 		P:    h.p,
 	}
-	if writeDirtyEncoding {
+	if WriteDirtyEncoding {
 		p.Encoding = PipelineExplicitDirty
 	} else {
 		p.Encoding = PipelineExplicitClean
@@ -95,11 +134,12 @@ func (h *HLLPP) convertToSparse() ([]byte, error) {
 		return nil, err
 	}
 
-	// Read registers out of Retailnext implementation and write to whichever
-	// format we selected above.
-	for it := newRegIterator(h); !it.done(); {
-		reg, val := it.next()
-		binary.Write(&ret, binary.LittleEndian, uint32(reg<<8)|uint32(val&0xff))
+	// Write the M register payload.
+	n, err := ret.Write(regBuf.Bytes())
+	if err != nil {
+		return nil, err
+	} else if n != regBuf.Len() {
+		return nil, fmt.Errorf("short register buffer %d != %d", n, regBuf.Len())
 	}
 
 	return ret.Bytes(), nil
