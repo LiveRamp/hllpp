@@ -26,7 +26,7 @@ func init() {
 }
 
 // This is a port of MurmurHash3_x64_128 from MurmurHash3.cpp
-func murmurSum64(data []byte) uint64 {
+func MurmurSum64(data []byte) uint64 {
 	var h1, h2, k1, k2 uint64
 
 	len := len(data)

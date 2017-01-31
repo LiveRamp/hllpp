@@ -99,8 +99,10 @@ func NewWithConfig(c Config) (*HLLPP, error) {
 // Add will hash v and add the result to the HyperLogLog++ estimator h. hllpp
 // uses a built-in non-streaming implementation of murmur3.
 func (h *HLLPP) Add(v []byte) {
-	x := murmurSum64(v)
+	h.AddHash(MurmurSum64(v))
+}
 
+func (h *HLLPP) AddHash(x uint64) {
 	if h.sparse {
 		h.tmpSet = append(h.tmpSet, h.encodeHash(x))
 
